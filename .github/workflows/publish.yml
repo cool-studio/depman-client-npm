@@ -70,13 +70,24 @@ jobs:
 
       # Staged publishing needs npm 11.15.0 or later -- a higher floor than
       # trusted publishing's own 11.5.1, so this is the number that matters.
-      # Node 24 already ships one, making this a floor rather than an upgrade:
-      # pinned to the major, because `npm@latest` would let a new major arrive
-      # in the middle of a release and this is the worst place to find out.
+      #
+      # A floor, and only a floor. Node 24 already ships an npm above it, and
+      # `npm install -g npm@^11.15.0` would *downgrade* a runner whose bundled
+      # npm has reached 12 -- a release job is the worst place to quietly move
+      # backwards. `npm@latest` has the opposite problem: it would let a new
+      # major arrive in the middle of a release.
       - name: Ensure npm can stage with OIDC
         run: |
-          npm install -g 'npm@^11.15.0'
-          npm --version
+          floor='11.15.0'
+          current="$(npm --version)"
+
+          if [ "$(printf '%s\n%s\n' "$floor" "$current" | sort -V | head -n1)" = "$floor" ]; then
+            echo "npm ${current} is at or above ${floor}."
+          else
+            echo "npm ${current} is below ${floor}; upgrading."
+            npm install -g "npm@>=${floor}"
+            npm --version
+          fi
 
       # npm publishes whatever the manifest says, so a tag that disagrees with
       # it ships one version under another's release notes -- and client.version
