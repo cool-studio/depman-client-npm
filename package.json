@@ -1,8 +1,13 @@
 {
     "name": "@depman/client",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Reports installed npm dependencies to DepMan from a post-install hook.",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/cool-studio/depman-client-npm.git"
+    },
+    "bugs": "https://github.com/cool-studio/depman/issues",
     "type": "module",
     "engines": {
         "node": ">=18"

@@ -38,6 +38,25 @@ describe('package.json', () => {
         assert.equal(CLIENT_NAME, manifest.name);
     });
 
+    test('the repository field names the mirror, and the bugs field does not', () => {
+        // **The registry enforces the first half of this.** Provenance is
+        // attested from the workflow run in the mirror, and npm validates
+        // `repository.url` against the repository in the sigstore bundle --
+        // an empty or monorepo-pointing value is a 422 on every `npm stage
+        // publish`, discovered at release time and nowhere earlier. That is
+        // how npm-client/v0.1.1 died: tagged, split, staged, and refused.
+        //
+        // `bugs` is the counterpart nothing enforces: the mirror has issues
+        // disabled by design (ADR-0020), and without an explicit value npm
+        // derives the Issues link from `repository` and sends people to a
+        // dead tab. Reports belong on the monorepo, as the README says.
+        assert.deepEqual(manifest.repository, {
+            type: 'git',
+            url: 'git+https://github.com/cool-studio/depman-client-npm.git',
+        });
+        assert.equal(manifest.bugs, 'https://github.com/cool-studio/depman/issues');
+    });
+
     test('the manifest version and the reported version agree', () => {
         // npm publishes what package.json says; the payload reports
         // CLIENT_VERSION. If they diverge, "which build produced this report?"
