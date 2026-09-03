@@ -1,0 +1,27 @@
+{
+    // One build, one output. src/ is what ships (package.json "files"), tests/ is
+    // compiled beside it so `node --test` can run them without a loader flag --
+    // type stripping is still experimental on the Node 18 floor this package
+    // advertises, and a toolchain that only works on new Node would undercut the
+    // point of advertising the floor at all.
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "rootDir": ".",
+        "outDir": "dist",
+        "strict": true,
+        "noUncheckedIndexedAccess": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "exactOptionalPropertyTypes": true,
+        "declaration": true,
+        "sourceMap": false,
+        "removeComments": false,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": true,
+        "types": ["node"]
+    },
+    "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

@@ -1,0 +1,7 @@
+# The npm tarball is shaped by "files" in package.json, not by this file --
+# npm has no export-ignore. This exists so that a `git archive` of the mirror,
+# and anything else that reads gitattributes, agrees with what npm publishes.
+/tests           export-ignore
+/tsconfig.json   export-ignore
+/biome.json      export-ignore
+/.gitattributes  export-ignore

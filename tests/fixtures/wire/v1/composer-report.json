@@ -1,0 +1,62 @@
+{
+    "depmanWireVersion": 1,
+    "report": {
+        "manifestDigest": "sha256:e181a0678b0f77a926373cbac680ccc9b82493f72653008125580ef806fa1e60",
+        "generatedAt": "2026-08-25T12:00:00Z",
+        "reason": "postinstall"
+    },
+    "project": "storefront",
+    "environment": {
+        "name": "production",
+        "resolvedFrom": "APP_ENV",
+        "ci": true
+    },
+    "client": {
+        "name": "depman/client",
+        "version": "1.0.0",
+        "packageManager": {
+            "name": "composer",
+            "version": "2.7.1"
+        },
+        "runtime": {
+            "name": "php",
+            "version": "8.3.10"
+        }
+    },
+    "ecosystem": "composer",
+    "manifest": {
+        "path": ".",
+        "lockfileName": "composer.lock"
+    },
+    "packages": [
+        {
+            "purl": "pkg:composer/laravel/framework@11.2.0",
+            "name": "laravel/framework",
+            "version": "11.2.0",
+            "scope": "runtime",
+            "relationship": "direct",
+            "requestedConstraint": "^11.0"
+        },
+        {
+            "purl": "pkg:composer/symfony/console@7.0.1",
+            "name": "symfony/console",
+            "version": "7.0.1",
+            "scope": "runtime",
+            "relationship": "transitive",
+            "paths": [
+                "pkg:composer/laravel/framework@11.2.0"
+            ]
+        },
+        {
+            "purl": "pkg:composer/phpunit/phpunit@11.5.0",
+            "name": "phpunit/phpunit",
+            "version": "11.5.0",
+            "scope": "dev",
+            "relationship": "direct"
+        }
+    ],
+    "counts": {
+        "packages": 3
+    },
+    "warnings": []
+}

@@ -1,0 +1,62 @@
+{
+    "depmanWireVersion": 1,
+    "report": {
+        "manifestDigest": "sha256:d1143c7fe554659ef307242e2869b278cd8ba0ee26ca7b31ffef95f5564bd21b",
+        "generatedAt": "2026-08-25T12:00:00Z",
+        "reason": "postinstall"
+    },
+    "project": "storefront",
+    "environment": {
+        "name": "production",
+        "resolvedFrom": "APP_ENV",
+        "ci": true
+    },
+    "client": {
+        "name": "@depman/client",
+        "version": "0.1.0",
+        "packageManager": {
+            "name": "npm",
+            "version": "10.8.2"
+        },
+        "runtime": {
+            "name": "node",
+            "version": "22.11.0"
+        }
+    },
+    "ecosystem": "npm",
+    "manifest": {
+        "path": ".",
+        "lockfileName": "package-lock.json"
+    },
+    "packages": [
+        {
+            "purl": "pkg:npm/%40octokit/rest@21.0.2",
+            "name": "@octokit/rest",
+            "version": "21.0.2",
+            "scope": "runtime",
+            "relationship": "direct",
+            "requestedConstraint": "^21.0.0"
+        },
+        {
+            "purl": "pkg:npm/typescript@5.6.3",
+            "name": "typescript",
+            "version": "5.6.3",
+            "scope": "dev",
+            "relationship": "direct"
+        },
+        {
+            "purl": "pkg:npm/universal-user-agent@7.0.2",
+            "name": "universal-user-agent",
+            "version": "7.0.2",
+            "scope": "runtime",
+            "relationship": "transitive",
+            "paths": [
+                "pkg:npm/%40octokit/rest@21.0.2"
+            ]
+        }
+    ],
+    "counts": {
+        "packages": 3
+    },
+    "warnings": []
+}

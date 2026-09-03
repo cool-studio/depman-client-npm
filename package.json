@@ -1,0 +1,31 @@
+{
+    "name": "@depman/client",
+    "version": "0.1.0",
+    "description": "Reports installed npm dependencies to DepMan from a post-install hook.",
+    "license": "MIT",
+    "type": "module",
+    "engines": {
+        "node": ">=18"
+    },
+    "bin": {
+        "depman": "./dist/src/cli.js"
+    },
+    "files": [
+        "dist/src"
+    ],
+    "dependencies": {},
+    "devDependencies": {
+        "@biomejs/biome": "^2.5.12",
+        "@types/node": "^18.19.0",
+        "typescript": "^5.9.0"
+    },
+    "scripts": {
+        "prepare": "npm run build",
+        "lint": "biome ci .",
+        "format": "biome check --write .",
+        "analyse": "tsc --noEmit",
+        "build": "tsc",
+        "test": "npm run build && node --test dist/tests/*.test.js",
+        "check": "npm run lint && npm run analyse && npm run test"
+    }
+}
