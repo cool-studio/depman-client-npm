@@ -4,4 +4,5 @@
 /tests           export-ignore
 /tsconfig.json   export-ignore
 /biome.json      export-ignore
+/.github         export-ignore
 /.gitattributes  export-ignore

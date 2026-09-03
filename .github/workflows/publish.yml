@@ -1,0 +1,179 @@
+name: Publish
+
+# Stages @depman/client on npm, from the mirror, on a version tag. A human then
+# approves it with 2FA before anyone can install it.
+#
+# This file is developed in the monorepo at
+# packages/npm-client/.github/workflows/publish.yml, where GitHub never reads
+# it -- Actions only looks at .github/workflows/ in a repository *root*. It
+# becomes live when `git subtree split` lands it at the root of
+# cool-studio/depman-client-npm. See docs/ingest-clients.md section 14.
+#
+# It lives here rather than in the monorepo's split-clients.yml because the
+# mirror is public, so its minutes are free, and because whatever can reach the
+# registry then belongs to the one repository that publishes -- the monorepo's
+# split job holds a deploy key that grants a single mirror and nothing else.
+# ADR-0040.
+#
+# npm has no Packagist-style webhook, so a tag publishes nothing by itself.
+# This is the missing half. The split pushes v0.1.0 here with a deploy key, and
+# a deploy-key push *does* trigger workflows -- a push made with a repository's
+# own GITHUB_TOKEN does not, which is the reason the mirror is pushed to with a
+# key and not a token.
+#
+# What this job does NOT do is publish. It stages, and a staged version is not
+# installable until a maintainer approves it -- see the Stage step.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  # Dispatch is for checking the wiring and for recovering from a failed run.
+  # It defaults to a dry run, and can be aimed at a tag by choosing that tag as
+  # the ref.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and print, stage nothing'
+        required: false
+        default: true
+        type: boolean
+
+# Per ref. Two versions must never stage concurrently, and a tag must not be
+# cancelled by anything arriving behind it.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # What npm exchanges for a short-lived credential. Trusted publishing means
+  # there is no npm token in this repository to leak or to rotate -- which
+  # matters more here than usual, because the mirror is public and is
+  # force-pushed by an automated job.
+  #
+  # The trusted publisher on npmjs.com allows this workflow to **stage** and
+  # not to publish, so what this token can be exchanged for cannot make a
+  # version installable on its own.
+  id-token: write
+
+jobs:
+  stage:
+    name: '@depman/client'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Staged publishing needs npm 11.15.0 or later -- a higher floor than
+      # trusted publishing's own 11.5.1, so this is the number that matters.
+      # Node 24 already ships one, making this a floor rather than an upgrade:
+      # pinned to the major, because `npm@latest` would let a new major arrive
+      # in the middle of a release and this is the worst place to find out.
+      - name: Ensure npm can stage with OIDC
+        run: |
+          npm install -g 'npm@^11.15.0'
+          npm --version
+
+      # npm publishes whatever the manifest says, so a tag that disagrees with
+      # it ships one version under another's release notes -- and client.version
+      # on every report from that build is then a lie about which code produced
+      # it. The other half of this pair is asserted in the suite below:
+      # package.test.ts holds package.json's version and CLIENT_VERSION equal.
+      #
+      # It is checked before staging rather than left to the approver. A staged
+      # version occupies the same version index as a published one, so a
+      # mistake here has to be rejected before it can be corrected.
+      - name: The tag and the manifest must agree
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = 'tag' ]; then
+            tagged="${GITHUB_REF_NAME#v}"
+            manifest="$(node -p 'require("./package.json").version')"
+
+            if [ "$tagged" != "$manifest" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${manifest}."
+              echo "::error::Bump both in the commit that gets tagged - docs/ingest-clients.md section 14."
+              exit 1
+            fi
+
+            echo "Staging ${manifest} as ${GITHUB_REF_NAME}."
+          elif [ "$DRY_RUN" = 'true' ]; then
+            echo "::notice::Dry run on ${GITHUB_REF_NAME}. Nothing is staged, so no tag is checked."
+          else
+            echo "::error::Staging a release needs a tag ref. Got ${GITHUB_REF_TYPE} [${GITHUB_REF_NAME}]."
+            echo "::error::Release by pushing npm-client/vX.Y.Z in the monorepo, which mirrors it here as vX.Y.Z."
+            exit 1
+          fi
+
+      # This repository is the client and nothing else, so `npm ci` here is
+      # docs/ingest-clients.md section 12's self-containment test performed for
+      # real, on every release, rather than by somebody copying the directory
+      # out by hand.
+      - run: npm ci
+
+      # The last automated gate before a human is asked to approve. The
+      # monorepo checked this client before splitting it; this checks the tree
+      # that is actually being staged, which is a different tree -- `files` and
+      # .gitattributes shape it.
+      #
+      # It runs before staging deliberately. An approver holding a red build
+      # has to reject a version to get rid of it, and the point of the approval
+      # step is judgement about the release, not triage of a broken one.
+      - name: The client's own checks
+        run: npm run check
+
+      # `npm stage publish`, never `npm publish`. A staged version is uploaded
+      # and inspectable but is not installable by anyone until a maintainer
+      # runs `npm stage approve` with 2FA -- so the compromise of this workflow,
+      # or of anything it runs, cannot by itself put code into a consumer's
+      # postinstall hook. That is the whole point, and publish.test.ts asserts
+      # the workflow contains no direct publish.
+      #
+      # --access public because a scoped package defaults to restricted, and a
+      # security tool nobody can install is worse than useless. --provenance is
+      # the default under trusted publishing and is passed anyway, so that a
+      # change to that default cannot quietly stop attesting.
+      #
+      # Re-running after a successful stage fails: a staged version occupies the
+      # same version index as a published one. That is the behaviour we want --
+      # see docs/ingest-clients.md section 14 on tag immutability.
+      - name: Stage for approval
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = 'true' ]; then
+            npm stage publish --access public --provenance --dry-run
+            echo "::notice::Dry run: nothing was staged."
+            exit 0
+          fi
+
+          npm stage publish --access public --provenance
+
+      # The release is not finished when this job goes green, and a green tick
+      # is exactly what makes people believe it is. Approval is interactive by
+      # design -- it needs 2FA, so no workflow can do it -- which means the
+      # only thing this job can do is say so where the releaser is looking.
+      - name: How to finish the release
+        if: ${{ success() && !inputs.dry_run }}
+        run: |
+          {
+            echo "### Staged, not published"
+            echo
+            echo "\`${GITHUB_REF_NAME}\` is staged. **Nobody can install it yet.**"
+            echo
+            echo "Inspect it, then approve it with 2FA — from a machine logged in to npm:"
+            echo
+            echo '```bash'
+            echo "npm stage list @depman/client"
+            echo "npm stage view <stage-id>       # or: npm stage download <stage-id>"
+            echo "npm stage approve <stage-id>    # prompts for 2FA; this is the release"
+            echo "npm stage reject <stage-id>     # discards it instead"
+            echo '```'
+            echo
+            echo "See [operations.md](https://github.com/cool-studio/depman/blob/main/docs/operations.md#the-npm-client--not-yet-set-up)."
+          } >> "$GITHUB_STEP_SUMMARY"
