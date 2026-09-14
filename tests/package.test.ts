@@ -76,4 +76,13 @@ describe('package.json', () => {
         // their machine to make the bin work.
         assert.deepEqual(manifest.files, ['dist/src']);
     });
+
+    test('the declared licence ships its text', () => {
+        // ADR-0047: the clients are MIT; the application is not. A "license"
+        // field is a claim about a file -- MIT requires its notice to travel
+        // with copies, and npm force-includes LICENSE in the tarball whatever
+        // `files` says, so the file existing here is what makes the claim true.
+        assert.equal(manifest.license, 'MIT');
+        assert.match(readFileSync(join(ROOT, 'LICENSE'), 'utf8'), /^MIT License/);
+    });
 });

@@ -189,4 +189,4 @@ Node `>=18`. No runtime dependencies.
 
 ## Licence
 
-MIT.
+[MIT](LICENSE). © 2026 Cool Studio.
