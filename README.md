@@ -15,9 +15,9 @@ update it.
 
 Each transitive package is reported with the route back to the dependency **you** declared, so an
 advisory against something you have never heard of still names the line in your `package.json` that
-pulls it in. The routes come from `node_modules/.package-lock.json` — npm's hidden lockfile, which
-the installer writes to describe what it put on disk, not what the project lockfile intended — and
-where they cannot be worked out the client sends nothing rather than a guess.
+pulls it in. The routes come from the installer's own record of what it put on disk — npm's hidden
+lockfile, or pnpm's virtual store — not what the project lockfile intended, and where they cannot
+be worked out the client sends nothing rather than a guess.
 
 ## It will not break your build
 
@@ -167,12 +167,17 @@ drains it and deletes only what the server accepted.
 
 ## What it reads
 
-`node_modules/.package-lock.json`, which npm writes after an install to describe what is on disk.
-Not your `package-lock.json`: that is an intention, and the two disagree exactly when it matters.
+What the installer itself wrote to describe what is on disk — never your project lockfile, which
+is an intention, and the two disagree exactly when it matters:
 
-**Only trees installed by npm are resolved today.** pnpm, Yarn and Bun install the same ecosystem
-but record their state differently, and a client that guessed at their trees would report a tree
-nobody has.
+- **npm**: `node_modules/.package-lock.json`, the hidden lockfile.
+- **pnpm**: the virtual store under `node_modules/.pnpm` — each instance's own installed
+  `package.json` and its symlink farm, which is pnpm's record of the graph. No YAML is parsed.
+
+**Trees installed by npm and by pnpm's default isolated linker are resolved.** Yarn and Bun install
+the same ecosystem but leave nothing on disk that can be read without executing project code or
+guessing at scopes, so the client refuses them loudly, by name — as it does pnpm's hoisted linker.
+Use the CI step or the HTTP contract for those.
 
 ## Requirements
 

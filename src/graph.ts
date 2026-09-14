@@ -39,10 +39,14 @@ const MAX_CANDIDATES = 12;
 export type Scope = 'runtime' | 'dev' | 'optional';
 
 export interface InstalledNode {
-    /** The hidden lockfile's own key, e.g. `node_modules/a/node_modules/b`. */
+    /**
+     * The reader's stable identity for one installed copy: the hidden
+     * lockfile's own key for npm (`node_modules/a/node_modules/b`), the
+     * virtual-store key for pnpm.
+     */
     readonly path: string;
-    /** The path split at each `node_modules/`, e.g. `['a', 'b']`. */
-    readonly segments: readonly string[];
+    /** The path split at each `node_modules/`, e.g. `['a', 'b']`. npm only. */
+    readonly segments?: readonly string[];
     readonly name: string;
     readonly version: string;
     readonly scope: Scope;
@@ -54,7 +58,16 @@ export interface Attribution {
     readonly paths: string[][];
 }
 
-export class Graph {
+/**
+ * What every per-manager reader hands the Resolver: the installed node set,
+ * and attribution from the root manifest's own dependency names.
+ */
+export interface InstalledTree {
+    installed(): Map<string, InstalledNode>;
+    attribute(roots: readonly string[]): Map<string, Attribution>;
+}
+
+export class Graph implements InstalledTree {
     private constructor(
         private readonly nodes: Map<string, InstalledNode>,
         /** Install path => the runtime dependency names it declares. */
@@ -169,87 +182,123 @@ export class Graph {
      * @returns Keyed by install path.
      */
     attribute(roots: readonly string[]): Map<string, Attribution> {
-        const depth = new Map<string, number>();
-        /** Ancestry, root-first, excluding the package itself. */
-        const chains = new Map<string, string[][]>();
-        let frontier: string[] = [];
+        const rootPaths: string[] = [];
 
         for (const root of roots) {
             const path = this.resolve([], root);
 
-            if (path === null || depth.has(path)) {
-                continue;
+            if (path !== null) {
+                rootPaths.push(path);
             }
-
-            depth.set(path, 0);
-            // A direct dependency has an empty ancestry, which is what makes its
-            // children's chains start with the direct dependency itself.
-            chains.set(path, [[]]);
-            frontier.push(path);
         }
 
-        frontier.sort();
+        return attributeWalk(rootPaths, (parent) => this.childrenOf(parent));
+    }
 
-        while (frontier.length > 0) {
-            const next: string[] = [];
+    /** A parent's edge names become install paths, resolved from its own depth. */
+    private childrenOf(parent: string): string[] {
+        const segments = this.nodes.get(parent)?.segments ?? [];
+        const children: string[] = [];
 
-            for (const parent of frontier) {
-                const parentDepth = depth.get(parent) ?? 0;
-                const parentChains = chains.get(parent) ?? [];
-                const parentSegments = this.nodes.get(parent)?.segments ?? [];
+        for (const required of this.edges.get(parent) ?? []) {
+            const child = this.resolve(segments, required);
 
-                for (const required of this.edges.get(parent) ?? []) {
-                    const child = this.resolve(parentSegments, required);
+            if (child !== null) {
+                children.push(child);
+            }
+        }
 
-                    if (child === null || child === parent) {
-                        continue;
+        return children;
+    }
+}
+
+/**
+ * Breadth-first attribution over a resolved edge set.
+ *
+ * Shared by every per-manager reader, because the walk is the subtle part of
+ * attribution -- depth, shortest chains, the cycle guard, determinism -- and
+ * duplicating it per format is how the readers would drift. A reader supplies
+ * node identity and edges; this decides depth and ancestry.
+ */
+export function attributeWalk(
+    roots: readonly string[],
+    childrenOf: (parent: string) => readonly string[],
+): Map<string, Attribution> {
+    const depth = new Map<string, number>();
+    /** Ancestry, root-first, excluding the package itself. */
+    const chains = new Map<string, string[][]>();
+    let frontier: string[] = [];
+
+    for (const root of roots) {
+        if (depth.has(root)) {
+            continue;
+        }
+
+        depth.set(root, 0);
+        // A direct dependency has an empty ancestry, which is what makes its
+        // children's chains start with the direct dependency itself.
+        chains.set(root, [[]]);
+        frontier.push(root);
+    }
+
+    frontier.sort();
+
+    while (frontier.length > 0) {
+        const next: string[] = [];
+
+        for (const parent of frontier) {
+            const parentDepth = depth.get(parent) ?? 0;
+            const parentChains = chains.get(parent) ?? [];
+
+            for (const child of childrenOf(parent)) {
+                if (child === parent) {
+                    continue;
+                }
+
+                if (!depth.has(child)) {
+                    depth.set(child, parentDepth + 1);
+                    chains.set(child, []);
+                    next.push(child);
+                }
+
+                // An edge back to an equal or shallower package is a cycle,
+                // or a longer way round to something already attributed.
+                // Neither adds a path, and an unguarded walk does not
+                // return.
+                if (depth.get(child) !== parentDepth + 1) {
+                    continue;
+                }
+
+                const childChains = chains.get(child) ?? [];
+
+                for (const chain of parentChains) {
+                    if (childChains.length >= MAX_CANDIDATES) {
+                        break;
                     }
 
-                    if (!depth.has(child)) {
-                        depth.set(child, parentDepth + 1);
-                        chains.set(child, []);
-                        next.push(child);
-                    }
+                    const extended = [...chain, parent];
 
-                    // An edge back to an equal or shallower package is a cycle,
-                    // or a longer way round to something already attributed.
-                    // Neither adds a path, and an unguarded walk does not
-                    // return.
-                    if (depth.get(child) !== parentDepth + 1) {
-                        continue;
-                    }
-
-                    const childChains = chains.get(child) ?? [];
-
-                    for (const chain of parentChains) {
-                        if (childChains.length >= MAX_CANDIDATES) {
-                            break;
-                        }
-
-                        const extended = [...chain, parent];
-
-                        if (extended.length <= MAX_CHAIN) {
-                            childChains.push(extended);
-                        }
+                    if (extended.length <= MAX_CHAIN) {
+                        childChains.push(extended);
                     }
                 }
             }
-
-            next.sort();
-            frontier = next;
         }
 
-        const attributed = new Map<string, Attribution>();
-
-        for (const [path, distance] of depth) {
-            attributed.set(path, {
-                depth: distance,
-                paths: distance === 0 ? [] : rank(chains.get(path) ?? []),
-            });
-        }
-
-        return attributed;
+        next.sort();
+        frontier = next;
     }
+
+    const attributed = new Map<string, Attribution>();
+
+    for (const [path, distance] of depth) {
+        attributed.set(path, {
+            depth: distance,
+            paths: distance === 0 ? [] : rank(chains.get(path) ?? []),
+        });
+    }
+
+    return attributed;
 }
 
 /**

@@ -3,7 +3,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { Config, ResolvedEnvironment } from './config.js';
 import type { Logger } from './logger.js';
-import type { PackageEntry } from './resolver.js';
+import type { PackageEntry, PackageManagerInfo } from './resolver.js';
 
 /**
  * Builds the wire payload and delivers it.
@@ -62,6 +62,7 @@ export class Reporter {
         packages: PackageEntry[],
         environment: ResolvedEnvironment,
         reason: string,
+        packageManager: PackageManagerInfo,
     ): WirePayload {
         return {
             depmanWireVersion: WIRE_VERSION,
@@ -79,13 +80,16 @@ export class Reporter {
             client: {
                 name: CLIENT_NAME,
                 version: CLIENT_VERSION,
-                packageManager: { name: 'npm', version: npmVersion() },
+                // The manager whose metadata was actually read -- pnpm installs
+                // the npm ecosystem too, and a report must say which tool
+                // produced it.
+                packageManager: { name: packageManager.name, version: packageManager.version },
                 runtime: { name: 'node', version: process.version.replace(/^v/, '') },
             },
             ecosystem: 'npm',
             manifest: {
                 path: config.manifestPath(),
-                lockfileName: 'package-lock.json',
+                lockfileName: packageManager.lockfileName,
             },
             packages,
             counts: { packages: packages.length },
@@ -244,15 +248,4 @@ function looksLikeCi(): boolean {
     }
 
     return false;
-}
-
-/**
- * npm sets `npm_config_user_agent` for anything it runs, in the shape
- * `npm/10.9.0 node/v22.11.0 linux x64 workspaces/false`.
- */
-function npmVersion(): string {
-    const agent = process.env.npm_config_user_agent;
-    const matched = agent === undefined ? null : /(?:^|\s)npm\/(\S+)/.exec(agent);
-
-    return matched?.[1] ?? 'unknown';
 }

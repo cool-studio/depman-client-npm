@@ -59,14 +59,27 @@ export class Client {
         // The source, never the value.
         this.logger.debug(`token found via ${found.source}.`);
 
-        const packages = this.resolver.resolve(projectRoot, config.includeDev(env), config.includeOptional(env));
+        const resolution = this.resolver.resolve(projectRoot, config.includeDev(env), config.includeOptional(env));
 
-        if (packages === null) {
+        if (resolution.outcome === 'refused') {
+            // The resolver has already named the manager loudly. A manager
+            // this client does not resolve is an ordinary state, not a
+            // failure -- the CI step and the HTTP contract still work.
+            return Result.skipped(`unsupported package manager (${resolution.manager})`);
+        }
+
+        if (resolution.outcome === 'absent') {
             return Result.skipped('no installed tree');
         }
 
         const environment = config.environment(env);
-        const payload = this.reporter.buildPayload(config, packages, environment, reason);
+        const payload = this.reporter.buildPayload(
+            config,
+            resolution.packages,
+            environment,
+            reason,
+            resolution.packageManager,
+        );
 
         const response = await this.reporter.send(endpoint, found.value, payload, config.timeoutMs(env));
 
@@ -74,7 +87,7 @@ export class Client {
             return this.handleUndelivered(config, payload, env, 'could not reach DepMan');
         }
 
-        return this.interpret(config, payload, response, environment.name, packages.length, env);
+        return this.interpret(config, payload, response, environment.name, resolution.packages.length, env);
     }
 
     private interpret(

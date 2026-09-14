@@ -38,6 +38,12 @@ function fixture(name: string): Record<string, unknown> {
     return JSON.parse(readFileSync(fixturePath(name), 'utf8'));
 }
 
+/** What the resolver reports for an npm-installed tree. */
+const NPM = { name: 'npm', version: '10.8.2', lockfileName: 'package-lock.json' };
+
+/** And for a pnpm-installed one. */
+const PNPM = { name: 'pnpm', version: '9.12.0', lockfileName: 'pnpm-lock.yaml' };
+
 after(() => {
     for (const root of roots) {
         cleanup(root);
@@ -127,6 +133,7 @@ describe('The canonical wire fixture', () => {
             [],
             { name: 'production', resolvedFrom: 'APP_ENV' },
             'postinstall',
+            NPM,
         );
 
         assert.deepEqual(Object.keys(built), Object.keys(wire));
@@ -150,7 +157,7 @@ describe('The canonical wire fixture', () => {
 
 describe('The payload', () => {
     test('it declares the wire version and the client identity', () => {
-        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual');
+        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual', NPM);
 
         assert.equal(built.depmanWireVersion, WIRE_VERSION);
         assert.equal(built.client.name, CLIENT_NAME);
@@ -165,14 +172,36 @@ describe('The payload', () => {
     });
 
     test('it names npm as the ecosystem and package-lock.json as the lockfile', () => {
-        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual');
+        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual', NPM);
 
         assert.equal(built.ecosystem, 'npm');
         assert.equal(built.manifest.lockfileName, 'package-lock.json');
     });
 
+    test('it names the manager that actually installed the tree', () => {
+        // pnpm installs the npm ecosystem too: the ecosystem stays npm, and
+        // packageManager says which tool produced the report.
+        const built = reporter().buildPayload(
+            config(),
+            [],
+            { name: 'local', resolvedFrom: 'fallback' },
+            'manual',
+            PNPM,
+        );
+
+        assert.equal(built.ecosystem, 'npm');
+        assert.deepEqual(built.client.packageManager, { name: 'pnpm', version: '9.12.0' });
+        assert.equal(built.manifest.lockfileName, 'pnpm-lock.yaml');
+    });
+
     test('it carries the resolved environment and its provenance', () => {
-        const built = reporter().buildPayload(config(), [], { name: 'staging', resolvedFrom: 'APP_ENV' }, 'manual');
+        const built = reporter().buildPayload(
+            config(),
+            [],
+            { name: 'staging', resolvedFrom: 'APP_ENV' },
+            'manual',
+            NPM,
+        );
 
         assert.equal(built.environment.name, 'staging');
         assert.equal(built.environment.resolvedFrom, 'APP_ENV');
@@ -184,6 +213,7 @@ describe('The payload', () => {
             [entry(), entry({ purl: 'pkg:npm/b@1.0.0' })],
             { name: 'local', resolvedFrom: 'fallback' },
             'manual',
+            NPM,
         );
 
         assert.equal(built.counts.packages, 2);
@@ -191,7 +221,7 @@ describe('The payload', () => {
     });
 
     test('generatedAt is a UTC instant', () => {
-        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual');
+        const built = reporter().buildPayload(config(), [], { name: 'local', resolvedFrom: 'fallback' }, 'manual', NPM);
 
         assert.match(built.report.generatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     });
@@ -203,6 +233,7 @@ describe('The payload', () => {
             [entry()],
             { name: 'local', resolvedFrom: 'fallback' },
             'manual',
+            NPM,
         );
 
         assert.doesNotMatch(JSON.stringify(built), /dpm_live_/);

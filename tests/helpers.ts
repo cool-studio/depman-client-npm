@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Logger, type Sink } from '../src/logger.js';
 import { type HttpResponse, Reporter, type WirePayload } from '../src/reporter.js';
@@ -67,6 +67,55 @@ export function hiddenLockfile(root: string, packages: Record<string, unknown>):
         requires: true,
         packages,
     });
+}
+
+export interface PnpmInstance {
+    /** The instance's own installed package.json, verbatim. */
+    manifest: Record<string, unknown>;
+    /** Symlink name in the instance's node_modules => target virtual-store key. */
+    links?: Record<string, string>;
+}
+
+/**
+ * A pnpm isolated-linker tree, in the same shapes pnpm itself writes: the
+ * virtual store under `node_modules/.pnpm`, one real package directory per
+ * instance with its own package.json, relative symlinks for the edges, and
+ * top-level symlinks for the names the root can resolve.
+ */
+export function pnpmTree(
+    root: string,
+    instances: Record<string, PnpmInstance>,
+    topLevel: Record<string, string>,
+    modulesYaml = 'hoistPattern: []\npackageManager: pnpm@9.12.0\nvirtualStoreDir: .pnpm\n',
+): void {
+    write(root, 'node_modules/.modules.yaml', modulesYaml);
+
+    const store = join(root, 'node_modules', '.pnpm');
+    const selfDir = (key: string): string => {
+        const name = String((instances[key]?.manifest as { name?: unknown } | undefined)?.name ?? key);
+
+        return join(store, key, 'node_modules', name);
+    };
+
+    for (const [key, instance] of Object.entries(instances)) {
+        writeJson(root, relative(root, join(selfDir(key), 'package.json')), instance.manifest);
+    }
+
+    for (const [key, instance] of Object.entries(instances)) {
+        for (const [linkName, target] of Object.entries(instance.links ?? {})) {
+            link(selfDir(target), join(store, key, 'node_modules', linkName));
+        }
+    }
+
+    for (const [name, target] of Object.entries(topLevel)) {
+        link(selfDir(target), join(root, 'node_modules', name));
+    }
+}
+
+/** A relative symlink, the way pnpm links, with parent directories created. */
+export function link(target: string, at: string): void {
+    mkdirSync(dirname(at), { recursive: true });
+    symlinkSync(relative(dirname(at), target), at);
 }
 
 export const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'tests', 'fixtures', 'wire', 'v1');

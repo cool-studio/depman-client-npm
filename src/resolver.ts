@@ -1,24 +1,35 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { Graph, type Scope } from './graph.js';
+import { Graph, type InstalledTree, type Scope } from './graph.js';
 import type { Logger } from './logger.js';
+import { readPnpmTree } from './resolvers/pnpm.js';
 
 /**
- * Reads the installed dependency tree from npm's own metadata.
+ * Reads the installed dependency tree, dispatching on which package manager
+ * actually installed it.
  *
- * Deliberately reads `node_modules/.package-lock.json` -- npm's hidden
- * lockfile, written by the installer to describe what it put on disk -- rather
- * than the project's `package-lock.json` or a `npm ls --json` subprocess:
+ * Four managers install the npm ecosystem, and they do not share
+ * installed-state metadata. Detection is from what is on disk -- never from
+ * `npm_config_user_agent`, which is absent when the hook runs outside an
+ * install and lies when one manager shells out to another:
  *
- *   - No subprocess, so it adds milliseconds rather than seconds to an install.
- *   - It is exactly what is on disk, not a fresh re-solve.
- *   - It carries `dev`, `optional` and `devOptional` per package, which is what
- *     distinguishes a dev dependency from a runtime one.
+ *   - **npm**: `node_modules/.package-lock.json`, the hidden lockfile the
+ *     installer writes to describe what it put on disk. Not the project's
+ *     `package-lock.json`, which is an intention. It carries `dev`, `optional`
+ *     and `devOptional` per package, and the per-entry `dependencies` maps
+ *     attribution walks. See Graph.
+ *   - **pnpm** (isolated linker): the virtual store under `node_modules/.pnpm`,
+ *     whose directories and symlink farm are the installer's own record. See
+ *     resolvers/pnpm.ts and ADR-0044.
+ *   - **Yarn** (every linker), **Bun**, and pnpm's hoisted linker: recognised
+ *     and refused loudly, by name. What they leave on disk cannot be read
+ *     without executing project code or guessing at scopes -- ADR-0044 records
+ *     each reason.
  *
- * Direct-versus-transitive is not in it, so it is reconstructed from the root
- * `package.json`'s dependency sections. Attribution -- the depth and ancestry
- * chains that answer "which of my dependencies pulled this in?" -- comes from
- * the per-entry `dependencies` maps in the same file; see Graph.
+ * Direct-versus-transitive is reconstructed from the root `package.json`'s
+ * dependency sections in every case, and the attribution walk is shared.
+ * No subprocess anywhere, so this adds milliseconds rather than seconds to an
+ * install.
  */
 
 /** The server's own ordering. Most privileged wins when two entries collide. */
@@ -45,27 +56,134 @@ export interface PackageEntry {
     paths?: string[][];
 }
 
+/** The manager whose metadata was actually read, for the payload. */
+export interface PackageManagerInfo {
+    name: string;
+    version: string;
+    lockfileName: string;
+}
+
+export type Resolution =
+    /** A tree was read, by the manager named here. */
+    | { outcome: 'resolved'; packages: PackageEntry[]; packageManager: PackageManagerInfo }
+    /**
+     * A recognised manager this client deliberately does not resolve. The
+     * resolver has already said so loudly; the caller skips -- an unsupported
+     * manager is an ordinary state, never a failure (section 0).
+     */
+    | { outcome: 'refused'; manager: string }
+    /** Nothing installed, or a tree too broken to read. Reported already. */
+    | { outcome: 'absent' };
+
 export class Resolver {
     constructor(private readonly logger: Logger) {}
 
-    /**
-     * Null when the tree cannot be read.
-     */
-    resolve(projectRoot: string, includeDev: boolean, includeOptional: boolean): PackageEntry[] | null {
-        const graph = Graph.read(join(projectRoot, 'node_modules', '.package-lock.json'), this.logger);
+    resolve(projectRoot: string, includeDev: boolean, includeOptional: boolean): Resolution {
+        const hidden = join(projectRoot, 'node_modules', '.package-lock.json');
 
-        if (graph === null) {
-            return null;
+        // npm's record first. A tree carrying more than one installer's state
+        // was installed twice, and the hidden lockfile is the record this
+        // client has always read.
+        if (isFile(hidden)) {
+            const graph = Graph.read(hidden, this.logger);
+
+            if (graph === null) {
+                return { outcome: 'absent' };
+            }
+
+            return this.entries(graph, projectRoot, includeDev, includeOptional, {
+                name: 'npm',
+                version: npmUserAgentVersion(),
+                lockfileName: 'package-lock.json',
+            });
         }
 
+        const pnpm = readPnpmTree(projectRoot, this.logger);
+
+        if (pnpm.outcome === 'tree') {
+            return this.entries(pnpm.tree, projectRoot, includeDev, includeOptional, {
+                name: 'pnpm',
+                version: pnpm.version,
+                lockfileName: 'pnpm-lock.yaml',
+            });
+        }
+
+        if (pnpm.outcome === 'refused') {
+            return { outcome: 'refused', manager: 'pnpm' };
+        }
+
+        if (pnpm.outcome === 'unreadable') {
+            return { outcome: 'absent' };
+        }
+
+        const refused = this.refusal(projectRoot);
+
+        if (refused !== null) {
+            // Loud, and it names the manager: against an installed tree,
+            // "nothing to report" reads as "no vulnerabilities".
+            this.logger.warn(refused.message);
+
+            return { outcome: 'refused', manager: refused.manager };
+        }
+
+        this.logger.debug('no installed tree found; nothing to report.');
+
+        return { outcome: 'absent' };
+    }
+
+    /**
+     * Managers this client recognises and deliberately does not resolve.
+     * ADR-0044 records each reason; the detection is from what is on disk.
+     */
+    private refusal(projectRoot: string): { manager: string; message: string } | null {
+        const has = (relative: string) => exists(join(projectRoot, relative));
+
+        if (has('.pnp.cjs') || has('.pnp.js') || has('.pnp.data.json')) {
+            return {
+                manager: 'yarn',
+                message:
+                    "Yarn Plug'n'Play installed this project. Reading .pnp.cjs means executing it, " +
+                    'which this client will not do to the project it inspects. ' +
+                    'Use the CI step or the HTTP contract instead.',
+            };
+        }
+
+        if (has('.yarn/install-state.gz') || (has('yarn.lock') && has('node_modules'))) {
+            return {
+                manager: 'yarn',
+                message:
+                    'Yarn installed this tree, and it leaves no per-package record this client ' +
+                    'can read without guessing at the scopes. Use the CI step or the HTTP contract instead.',
+            };
+        }
+
+        if ((has('bun.lockb') || has('bun.lock')) && has('node_modules')) {
+            return {
+                manager: 'bun',
+                message:
+                    'Bun installed this tree, and Bun records no installed state at all -- its ' +
+                    'lockfile is an intention, not what is on disk. Use the CI step or the HTTP contract instead.',
+            };
+        }
+
+        return null;
+    }
+
+    private entries(
+        tree: InstalledTree,
+        projectRoot: string,
+        includeDev: boolean,
+        includeOptional: boolean,
+        packageManager: PackageManagerInfo,
+    ): Resolution {
         const direct = this.directDependencies(projectRoot);
-        const attribution = graph.attribute(Object.keys(direct));
+        const attribution = tree.attribute(Object.keys(direct));
 
         const entries: PackageEntry[] = [];
         const purlByPath = new Map<string, string>();
         const chains = new Map<number, string[][]>();
 
-        for (const node of graph.installed().values()) {
+        for (const node of tree.installed().values()) {
             if (node.scope === 'dev' && !includeDev) {
                 continue;
             }
@@ -110,7 +228,11 @@ export class Resolver {
             }
         }
 
-        return dedupe(entries).sort((a, b) => compare(a.purl, b.purl));
+        return {
+            outcome: 'resolved',
+            packages: dedupe(entries).sort((a, b) => compare(a.purl, b.purl)),
+            packageManager,
+        };
     }
 
     /**
@@ -266,4 +388,35 @@ export function purl(name: string, version: string): string {
 /** Byte-wise, so ordering never depends on a locale. */
 function compare(a: string, b: string): number {
     return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * npm sets `npm_config_user_agent` for anything it runs, in the shape
+ * `npm/10.9.0 node/v22.11.0 linux x64 workspaces/false`. Used for the version
+ * only, never for detection -- the variable is absent outside an install and
+ * lies when one manager shells out to another.
+ */
+export function npmUserAgentVersion(): string {
+    const agent = process.env.npm_config_user_agent;
+    const matched = agent === undefined ? null : /(?:^|\s)npm\/(\S+)/.exec(agent);
+
+    return matched?.[1] ?? 'unknown';
+}
+
+function isFile(path: string): boolean {
+    try {
+        return statSync(path).isFile();
+    } catch {
+        return false;
+    }
+}
+
+function exists(path: string): boolean {
+    try {
+        statSync(path);
+
+        return true;
+    } catch {
+        return false;
+    }
 }
