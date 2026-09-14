@@ -1,7 +1,8 @@
 import { type Dirent, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { type Attribution, attributeWalk, type InstalledNode, type InstalledTree, type Scope } from '../graph.js';
+import { type Attribution, attributeWalk, type InstalledNode, type InstalledTree } from '../graph.js';
 import type { Logger } from '../logger.js';
+import { names, propagateClasses, readManifest, type ScopeEdge, scopeOfClasses, seedClasses } from './scopes.js';
 
 /**
  * The installed dependency graph of a pnpm tree, read from the virtual store.
@@ -37,37 +38,8 @@ interface Instance {
     readonly name: string;
     readonly version: string;
     /** In link-name order, targets that resolved inside the store. */
-    readonly edges: readonly Edge[];
+    readonly edges: readonly ScopeEdge[];
 }
-
-interface Edge {
-    readonly target: string;
-    /** True when the parent declares the link under optionalDependencies. */
-    readonly optional: boolean;
-}
-
-/**
- * A path class: how one route from the manifest reaches a package.
- * Bit 1 -- the route starts at devDependencies. Bit 2 -- it crosses an
- * optionalDependencies link anywhere. Per node the walk accumulates the *set*
- * of classes seen, as a bitmask of `1 << class`, which is exactly the input
- * npm's own dev / optional / devOptional flags are computed from.
- */
-const DEV = 1;
-const OPTIONAL = 2;
-
-/**
- * Which root-manifest section seeds which path class, first hit winning.
- * optionalDependencies before devDependencies: an optional dependency is
- * installed in production, so it outranks a dev declaration of the same name.
- */
-const SECTION_SEEDS: ReadonlyArray<[string, number]> = [
-    ['dependencies', 0],
-    ['optionalDependencies', OPTIONAL],
-    ['devDependencies', DEV],
-    // npm 7+ and pnpm both install a root manifest's peers.
-    ['peerDependencies', 0],
-];
 
 export type PnpmRead =
     | { outcome: 'tree'; tree: InstalledTree; version: string }
@@ -108,7 +80,11 @@ export function readPnpmTree(projectRoot: string, logger: Logger): PnpmRead {
     }
 
     const rootIds = topLevelIds(modulesDir, store);
-    const reached = propagate(seedClasses(projectRoot, rootIds), instances);
+    const reached = propagateClasses(
+        seedClasses(projectRoot, rootIds),
+        new Set(instances.keys()),
+        new Map([...instances].map(([key, instance]) => [key, instance.edges])),
+    );
 
     const nodes = new Map<string, InstalledNode>();
     let unreached = 0;
@@ -123,7 +99,7 @@ export function readPnpmTree(projectRoot: string, logger: Logger): PnpmRead {
         }
 
         const instance = instances.get(key) as Instance;
-        nodes.set(key, { path: key, name: instance.name, version: instance.version, scope: scopeOf(classes) });
+        nodes.set(key, { path: key, name: instance.name, version: instance.version, scope: scopeOfClasses(classes) });
     }
 
     if (unreached > 0) {
@@ -250,7 +226,7 @@ function readStore(store: string, logger: Logger): Map<string, Instance> | null 
         }
 
         const optionalNames = new Set(names(manifest.optionalDependencies));
-        const edges: Edge[] = [];
+        const edges: ScopeEdge[] = [];
 
         for (const entry of listed) {
             if (!entry.isLink) {
@@ -392,94 +368,6 @@ function topLevelIds(modulesDir: string, store: string): Map<string, string> {
 }
 
 /**
- * Seed path classes from the root manifest, keyed by store key. Two manifest
- * names resolving to one instance -- an alias beside the real name -- simply
- * contribute their classes to the same set.
- */
-function seedClasses(projectRoot: string, rootIds: Map<string, string>): [string, number][] {
-    const seeds: [string, number][] = [];
-    const manifest = readManifest(join(projectRoot, 'package.json'));
-
-    if (manifest === null) {
-        return seeds;
-    }
-
-    const seen = new Set<string>();
-
-    for (const [section, pathClass] of SECTION_SEEDS) {
-        for (const name of names(manifest[section])) {
-            if (seen.has(name)) {
-                continue;
-            }
-
-            seen.add(name);
-
-            const id = rootIds.get(name);
-
-            if (id !== undefined) {
-                seeds.push([id, pathClass]);
-            }
-        }
-    }
-
-    return seeds;
-}
-
-/**
- * Accumulate every node's set of reachable path classes over the on-disk
- * edges -- the input npm computes its own dev / optional / devOptional flags
- * from. The worklist carries (node, class) pairs and each of the four classes
- * enters a node's set at most once, so it terminates on any graph, cycles
- * included.
- */
-function propagate(seeds: [string, number][], instances: Map<string, Instance>): Map<string, number> {
-    const reached = new Map<string, number>();
-    const queue: [string, number][] = [];
-
-    const visit = (id: string, pathClass: number): void => {
-        const mask = 1 << pathClass;
-        const existing = reached.get(id) ?? 0;
-
-        if ((existing & mask) === 0 && instances.has(id)) {
-            reached.set(id, existing | mask);
-            queue.push([id, pathClass]);
-        }
-    };
-
-    for (const [id, pathClass] of seeds) {
-        visit(id, pathClass);
-    }
-
-    for (let index = 0; index < queue.length; index++) {
-        const [id, pathClass] = queue[index] as [string, number];
-
-        for (const edge of (instances.get(id) as Instance).edges) {
-            visit(edge.target, edge.optional ? pathClass | OPTIONAL : pathClass);
-        }
-    }
-
-    return reached;
-}
-
-/**
- * npm's own flag semantics, read off the class set: any plain production
- * path makes a package runtime; only-dev paths make it dev; everything else
- * -- every path optional, or npm's devOptional mix of dev and optional
- * routes -- reports optional, the more privileged of the two it means.
- */
-function scopeOf(classes: number): Scope {
-    if ((classes & (1 << 0)) !== 0) {
-        return 'runtime';
-    }
-
-    if (classes === 1 << DEV) {
-        return 'dev';
-    }
-
-    return 'optional';
-}
-
-/**
  * The single scalar this client reads out of `.modules.yaml`: the version the
  * payload carries. An absent or unrecognisable line is an admitted `unknown`,
  * never a guess -- and never a reason to refuse a tree the store itself
@@ -493,26 +381,6 @@ function pnpmVersion(modulesManifest: string): string {
     } catch {
         return 'unknown';
     }
-}
-
-function readManifest(path: string): Record<string, unknown> | null {
-    let decoded: unknown;
-
-    try {
-        decoded = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-        return null;
-    }
-
-    return isRecord(decoded) ? decoded : null;
-}
-
-function names(links: unknown): string[] {
-    return isRecord(links) ? Object.keys(links) : [];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function isFile(path: string): boolean {

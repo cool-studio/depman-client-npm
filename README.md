@@ -173,9 +173,12 @@ is an intention, and the two disagree exactly when it matters:
 - **npm**: `node_modules/.package-lock.json`, the hidden lockfile.
 - **pnpm**: the virtual store under `node_modules/.pnpm` — each instance's own installed
   `package.json` and its symlink farm, which is pnpm's record of the graph. No YAML is parsed.
+- **Yarn Plug'n'Play**: the PnP state, read **as data** — `.pnp.data.json`, or the state literal
+  extracted from `.pnp.cjs` as text. The client never executes `.pnp.cjs`; a state it cannot read
+  as data is skipped with a message naming `pnpEnableInlining: false` as the fix.
 
-**Trees installed by npm and by pnpm's default isolated linker are resolved.** Yarn and Bun install
-the same ecosystem but leave nothing on disk that can be read without executing project code or
+**Trees installed by npm, by pnpm's default isolated linker and by Yarn Plug'n'Play are
+resolved.** Yarn's node-modules linkers and Bun leave nothing on disk that can be read without
 guessing at scopes, so the client refuses them loudly, by name — as it does pnpm's hoisted linker.
 Use the CI step or the HTTP contract for those.
 

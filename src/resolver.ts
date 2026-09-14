@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { Graph, type InstalledTree, type Scope } from './graph.js';
 import type { Logger } from './logger.js';
 import { readPnpmTree } from './resolvers/pnpm.js';
+import { readYarnPnpTree } from './resolvers/yarn-pnp.js';
 
 /**
  * Reads the installed dependency tree, dispatching on which package manager
@@ -21,10 +22,12 @@ import { readPnpmTree } from './resolvers/pnpm.js';
  *   - **pnpm** (isolated linker): the virtual store under `node_modules/.pnpm`,
  *     whose directories and symlink farm are the installer's own record. See
  *     resolvers/pnpm.ts and ADR-0044.
- *   - **Yarn** (every linker), **Bun**, and pnpm's hoisted linker: recognised
+ *   - **Yarn Plug'n'Play**: the PnP state, read as data -- `.pnp.data.json`,
+ *     or the literal extracted from `.pnp.cjs` as text. Never evaluated. See
+ *     resolvers/yarn-pnp.ts and ADR-0045.
+ *   - **Yarn's other linkers**, **Bun**, and pnpm's hoisted linker: recognised
  *     and refused loudly, by name. What they leave on disk cannot be read
- *     without executing project code or guessing at scopes -- ADR-0044 records
- *     each reason.
+ *     without guessing at scopes -- ADR-0044 records each reason.
  *
  * Direct-versus-transitive is reconstructed from the root `package.json`'s
  * dependency sections in every case, and the attribution walk is shared.
@@ -116,6 +119,20 @@ export class Resolver {
             return { outcome: 'absent' };
         }
 
+        const yarnPnp = readYarnPnpTree(projectRoot, this.logger);
+
+        if (yarnPnp.outcome === 'tree') {
+            return this.entries(yarnPnp.tree, projectRoot, includeDev, includeOptional, {
+                name: 'yarn',
+                version: yarnPnp.version,
+                lockfileName: 'yarn.lock',
+            });
+        }
+
+        if (yarnPnp.outcome === 'unreadable') {
+            return { outcome: 'absent' };
+        }
+
         const refused = this.refusal(projectRoot);
 
         if (refused !== null) {
@@ -138,16 +155,8 @@ export class Resolver {
     private refusal(projectRoot: string): { manager: string; message: string } | null {
         const has = (relative: string) => exists(join(projectRoot, relative));
 
-        if (has('.pnp.cjs') || has('.pnp.js') || has('.pnp.data.json')) {
-            return {
-                manager: 'yarn',
-                message:
-                    "Yarn Plug'n'Play installed this project. Reading .pnp.cjs means executing it, " +
-                    'which this client will not do to the project it inspects. ' +
-                    'Use the CI step or the HTTP contract instead.',
-            };
-        }
-
+        // Plug'n'Play never reaches here -- resolvers/yarn-pnp.ts owns those
+        // files, resolving them or refusing loudly itself.
         if (has('.yarn/install-state.gz') || (has('yarn.lock') && has('node_modules'))) {
             return {
                 manager: 'yarn',

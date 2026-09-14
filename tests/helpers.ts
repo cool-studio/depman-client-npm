@@ -118,6 +118,17 @@ export function link(target: string, at: string): void {
     symlinkSync(relative(dirname(at), target), at);
 }
 
+/**
+ * Yarn's own embedding of the PnP state into `.pnp.cjs`: a single-quoted
+ * literal with backslash-newline continuations. The byte shape was verified
+ * against real Yarn 4 output before this helper imitated it.
+ */
+export function inlinePnpState(json: string): string {
+    const escaped = json.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\\n');
+
+    return `const RAW_RUNTIME_STATE =\n'${escaped}';\n`;
+}
+
 export const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'tests', 'fixtures', 'wire', 'v1');
 
 /**

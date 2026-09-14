@@ -1,7 +1,20 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { purl, Resolver } from '../src/resolver.js';
-import { cleanup, hiddenLockfile, link, pnpmTree, recordingLogger, workspace, write, writeJson } from './helpers.js';
+import { extractInlinedState, versionOf } from '../src/resolvers/yarn-pnp.js';
+import {
+    cleanup,
+    hiddenLockfile,
+    inlinePnpState,
+    link,
+    pnpmTree,
+    recordingLogger,
+    workspace,
+    write,
+    writeJson,
+} from './helpers.js';
 
 const roots: string[] = [];
 
@@ -680,11 +693,11 @@ describe('Refused package managers', () => {
         return resolveWith(root);
     }
 
-    test('Yarn Plug’n’Play is refused by name, because reading .pnp.cjs means executing it', () => {
-        const { resolution, sink } = refusedProject({ '.pnp.cjs': '/* generated */' });
+    test('a PnP file that cannot be read as data is skipped loudly, never executed', () => {
+        const { resolution, sink } = refusedProject({ '.pnp.cjs': '/* generated, but no extractable state */' });
 
-        assert.deepEqual(resolution, { outcome: 'refused', manager: 'yarn' });
-        assert.match(sink.text(), /Plug'n'Play/);
+        assert.deepEqual(resolution, { outcome: 'absent' });
+        assert.match(sink.text(), /will not execute \.pnp\.cjs/);
     });
 
     test('a Yarn node_modules tree is refused by name', () => {
@@ -731,5 +744,280 @@ describe('Refused package managers', () => {
         const { resolution } = resolveWith(root);
 
         assert.equal(resolution.outcome, 'resolved');
+    });
+});
+
+describe('Yarn PnP resolution', () => {
+    /**
+     * Registry shapes mirror real Yarn 4 output: the top-level entry under
+     * [null, [[null, …]]], instances as [reference, {packageDependencies,
+     * linkType}], virtual locators for peer variants, null for unmet peers.
+     */
+    function state(rootDependencies: [string, unknown][], registry: unknown[]): object {
+        return {
+            __info: [],
+            dependencyTreeRoots: [{ name: 'consumer', reference: 'workspace:.' }],
+            packageRegistryData: [
+                [null, [[null, { packageLocation: './', packageDependencies: rootDependencies, linkType: 'SOFT' }]]],
+                [
+                    'consumer',
+                    [
+                        [
+                            'workspace:.',
+                            { packageLocation: './', packageDependencies: rootDependencies, linkType: 'SOFT' },
+                        ],
+                    ],
+                ],
+                ...registry,
+            ],
+        };
+    }
+
+    function instance(reference: string, dependencies: [string, unknown][] = []): unknown[] {
+        return [
+            reference,
+            {
+                packageLocation: './.yarn/cache/x.zip/node_modules/x/',
+                packageDependencies: dependencies,
+                linkType: 'HARD',
+            },
+        ];
+    }
+
+    function pnpProject(manifest: unknown, pnpState: object, inlined = false): string {
+        const root = workspace();
+        roots.push(root);
+        writeJson(root, 'package.json', manifest);
+
+        if (inlined) {
+            // A booby trap ahead of the literal: if anything ever evaluates
+            // this file, it says so on disk and the test fails.
+            write(
+                root,
+                '.pnp.cjs',
+                `require('node:fs').writeFileSync(require('node:path').join(__dirname, 'EXECUTED'), '1');\n${inlinePnpState(JSON.stringify(pnpState, null, 2))}`,
+            );
+        } else {
+            writeJson(root, '.pnp.data.json', pnpState);
+        }
+
+        return root;
+    }
+
+    const MANIFEST = {
+        name: 'consumer',
+        packageManager: 'yarn@4.5.0',
+        dependencies: { a: '^1.0.0' },
+        devDependencies: { d: '^2.0.0' },
+    };
+
+    const STATE = state(
+        [
+            ['consumer', 'workspace:.'],
+            ['a', 'npm:1.0.0'],
+            ['d', 'npm:2.0.0'],
+        ],
+        [
+            [
+                'a',
+                [
+                    instance('npm:1.0.0', [
+                        ['a', 'npm:1.0.0'],
+                        ['b', 'npm:1.5.0'],
+                    ]),
+                ],
+            ],
+            ['b', [instance('npm:1.5.0', [['b', 'npm:1.5.0']])]],
+            ['d', [instance('npm:2.0.0', [['d', 'npm:2.0.0']])]],
+        ],
+    );
+
+    test('it resolves .pnp.data.json: scopes, relationships, attribution and the manager', () => {
+        const root = pnpProject(MANIFEST, STATE);
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome, 'resolved');
+
+        if (resolution.outcome !== 'resolved') {
+            return;
+        }
+
+        assert.deepEqual(resolution.packageManager, { name: 'yarn', version: '4.5.0', lockfileName: 'yarn.lock' });
+        assert.deepEqual(
+            resolution.packages.map((entry) => [entry.name, entry.scope, entry.relationship, entry.depth]),
+            [
+                ['a', 'runtime', 'direct', 0],
+                ['b', 'runtime', 'transitive', 1],
+                ['d', 'dev', 'direct', 0],
+            ],
+        );
+        assert.equal(resolution.packages[0]?.requestedConstraint, '^1.0.0');
+        assert.deepEqual(resolution.packages[1]?.paths, [['pkg:npm/a@1.0.0']]);
+    });
+
+    test('the inlined .pnp.cjs form resolves identically, and the file is never executed', () => {
+        const root = pnpProject(MANIFEST, STATE, true);
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome, 'resolved');
+        assert.equal(
+            resolution.outcome === 'resolved' && resolution.packages.map((entry) => entry.name).join(','),
+            'a,b,d',
+        );
+        assert.equal(existsSync(join(root, 'EXECUTED')), false, '.pnp.cjs was evaluated');
+    });
+
+    test('virtual instances are peer variants and deduplicate on purl', () => {
+        const virtualOne = 'virtual:aaa#npm:3.0.0';
+        const virtualTwo = 'virtual:bbb#npm:3.0.0';
+        const root = pnpProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0', b: '^1.0.0' } },
+            state(
+                [
+                    ['a', 'npm:1.0.0'],
+                    ['b', 'npm:1.0.0'],
+                ],
+                [
+                    [
+                        'a',
+                        [
+                            instance('npm:1.0.0', [
+                                ['a', 'npm:1.0.0'],
+                                ['peered', virtualOne],
+                            ]),
+                        ],
+                    ],
+                    [
+                        'b',
+                        [
+                            instance('npm:1.0.0', [
+                                ['b', 'npm:1.0.0'],
+                                ['peered', virtualTwo],
+                            ]),
+                        ],
+                    ],
+                    [
+                        'peered',
+                        [
+                            instance(virtualOne, [
+                                ['peered', virtualOne],
+                                ['supports-color', null],
+                            ]),
+                            instance(virtualTwo, [
+                                ['peered', virtualTwo],
+                                ['supports-color', null],
+                            ]),
+                        ],
+                    ],
+                ],
+            ),
+        );
+
+        const peered = resolve(root).filter((entry) => entry.name === 'peered');
+
+        assert.equal(peered.length, 1);
+        assert.equal(peered[0]?.version, '3.0.0');
+    });
+
+    test('workspace locators and unknown protocols are skipped, chains dropped whole', () => {
+        const root = pnpProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0', web: 'workspace:*', tool: 'portal:./tool' } },
+            state(
+                [
+                    ['a', 'npm:1.0.0'],
+                    ['web', 'workspace:packages/web'],
+                    ['tool', 'portal:./tool::locator=consumer'],
+                ],
+                [
+                    ['a', [instance('npm:1.0.0', [['a', 'npm:1.0.0']])]],
+                    ['web', [instance('workspace:packages/web', [['under', 'npm:1.0.0']])]],
+                    ['tool', [instance('portal:./tool::locator=consumer', [['under', 'npm:1.0.0']])]],
+                    ['under', [instance('npm:1.0.0', [['under', 'npm:1.0.0']])]],
+                ],
+            ),
+        );
+
+        // Only what the manifest reaches through readable locators: `under`
+        // sits behind a workspace and a portal, so it is not this manifest's
+        // to report, and no parent is invented for it.
+        assert.deepEqual(
+            resolve(root).map((entry) => entry.name),
+            ['a'],
+        );
+    });
+
+    test('a patch: reference carries the patched package’s version', () => {
+        // Yarn patches TypeScript by default, so this shape is routine.
+        const patched = 'patch:typescript@npm%3A5.6.3#optional!builtin<compat/typescript>';
+        const root = pnpProject(
+            { name: 'consumer', devDependencies: { typescript: '^5.6.0' } },
+            state([['typescript', patched]], [['typescript', [instance(patched, [['typescript', patched]])]]]),
+        );
+
+        const entry = resolve(root)[0];
+
+        assert.equal(entry?.name, 'typescript');
+        assert.equal(entry?.version, '5.6.3');
+        assert.equal(entry?.scope, 'dev');
+    });
+
+    test('unparseable PnP state is a loud skip that names the way out', () => {
+        const root = workspace();
+        roots.push(root);
+        writeJson(root, 'package.json', { name: 'consumer' });
+        writeJson(root, '.pnp.data.json', { packageRegistryData: 'not an array' });
+
+        const { resolution, sink } = resolveWith(root);
+
+        assert.deepEqual(resolution, { outcome: 'absent' });
+        assert.match(sink.text(), /pnpEnableInlining/);
+    });
+
+    test('the yarn version is unknown without a packageManager pin, and the tree still resolves', () => {
+        const root = pnpProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0' } },
+            state([['a', 'npm:1.0.0']], [['a', [instance('npm:1.0.0')]]]),
+        );
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome === 'resolved' && resolution.packageManager.version, 'unknown');
+    });
+});
+
+describe('PnP reference parsing', () => {
+    test('the whitelist, and only the whitelist, yields versions', () => {
+        assert.equal(versionOf('npm:1.2.3'), '1.2.3');
+        assert.equal(versionOf('npm:1.2.3::__archiveUrl=https%3A%2F%2Fexample.com'), '1.2.3');
+        assert.equal(versionOf('virtual:abc123#npm:4.4.3'), '4.4.3');
+        assert.equal(versionOf('patch:typescript@npm%3A5.6.3#optional!builtin<compat/typescript>'), '5.6.3');
+        assert.equal(versionOf('workspace:.'), null);
+        assert.equal(versionOf('workspace:packages/web'), null);
+        assert.equal(versionOf('portal:./tool'), null);
+        assert.equal(versionOf('link:./somewhere'), null);
+        assert.equal(versionOf('exec:./gen.js'), null);
+        assert.equal(versionOf('npm:'), null);
+        assert.equal(versionOf('virtual:abc123'), null);
+        assert.equal(versionOf('patch:typescript@workspace%3A.#./local.patch'), null);
+    });
+});
+
+describe('Inlined PnP state extraction', () => {
+    test('it round-trips the exact escapes real Yarn output uses', () => {
+        // The backslash-newline pairs are line *continuations*: they decode to
+        // nothing, so the extracted text is the JSON minus its newlines --
+        // insignificant whitespace, byte-identical semantics.
+        const value = { packageRegistryData: [], note: "it's a backslash: \\ and a regex \\/" };
+        const extracted = extractInlinedState(inlinePnpState(JSON.stringify(value, null, 2)));
+
+        assert.notEqual(extracted, null);
+        assert.doesNotMatch(extracted as string, /\n/);
+        assert.deepEqual(JSON.parse(extracted as string), value);
+    });
+
+    test('anything outside the known shape is null, never a guess', () => {
+        assert.equal(extractInlinedState('module.exports = {};'), null, 'missing marker');
+        assert.equal(extractInlinedState('const RAW_RUNTIME_STATE = 42;'), null, 'no literal');
+        assert.equal(extractInlinedState("const RAW_RUNTIME_STATE =\n'unterminated"), null, 'unterminated literal');
+        assert.equal(extractInlinedState("const RAW_RUNTIME_STATE =\n'bad \\t escape'"), null, 'unknown escape');
     });
 });
