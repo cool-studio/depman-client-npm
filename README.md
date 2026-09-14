@@ -167,8 +167,8 @@ drains it and deletes only what the server accepted.
 
 ## What it reads
 
-What the installer itself wrote to describe what is on disk — never your project lockfile, which
-is an intention, and the two disagree exactly when it matters:
+The most precise record the installer left of what is on disk — never your project lockfile,
+which is an intention, and the two disagree exactly when it matters:
 
 - **npm**: `node_modules/.package-lock.json`, the hidden lockfile.
 - **pnpm**: the virtual store under `node_modules/.pnpm` — each instance's own installed
@@ -176,11 +176,12 @@ is an intention, and the two disagree exactly when it matters:
 - **Yarn Plug'n'Play**: the PnP state, read **as data** — `.pnp.data.json`, or the state literal
   extracted from `.pnp.cjs` as text. The client never executes `.pnp.cjs`; a state it cannot read
   as data is skipped with a message naming `pnpEnableInlining: false` as the fix.
+- **Every flat layout** — Yarn Classic, Yarn Berry's node-modules linker, Bun, pnpm's hoisted
+  linker: the installed packages' own `package.json` files, with edges resolved the way `require()`
+  resolves them. Lockfiles are used only to tell which manager installed the tree; none is parsed.
 
-**Trees installed by npm, by pnpm's default isolated linker and by Yarn Plug'n'Play are
-resolved.** Yarn's node-modules linkers and Bun leave nothing on disk that can be read without
-guessing at scopes, so the client refuses them loudly, by name — as it does pnpm's hoisted linker.
-Use the CI step or the HTTP contract for those.
+**Trees installed by npm, pnpm, Yarn and Bun are all resolved**, and the report names the manager
+that actually installed the tree.
 
 ## Requirements
 

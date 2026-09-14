@@ -2,7 +2,14 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Attribution, attributeWalk, type InstalledNode, type InstalledTree } from '../graph.js';
 import type { Logger } from '../logger.js';
-import { isRecord, propagateClasses, readManifest, type ScopeEdge, scopeOfClasses, seedClasses } from './scopes.js';
+import {
+    isRecord,
+    pinnedManagerVersion,
+    propagateClasses,
+    type ScopeEdge,
+    scopeOfClasses,
+    seedClasses,
+} from './scopes.js';
 
 /**
  * The installed dependency graph of a Yarn Plug'n'Play project, read from the
@@ -85,7 +92,7 @@ export function readYarnPnpTree(projectRoot: string, logger: Logger): YarnPnpRea
     return {
         outcome: 'tree',
         tree: buildTree(projectRoot, registry, logger),
-        version: yarnVersion(projectRoot),
+        version: pinnedManagerVersion(projectRoot, 'yarn'),
     };
 }
 
@@ -353,18 +360,6 @@ export function extractInlinedState(text: string): string | null {
     }
 
     return null;
-}
-
-/**
- * `packageManager: "yarn@X.Y.Z"` in the root manifest is the committed pin
- * corepack enforces -- the closest thing PnP state has to an installer
- * version. Absent or unrecognisable degrades to `unknown`, never a guess.
- */
-function yarnVersion(projectRoot: string): string {
-    const pin = readManifest(join(projectRoot, 'package.json'))?.packageManager;
-    const matched = typeof pin === 'string' ? /^yarn@(\S+)$/.exec(pin) : null;
-
-    return matched?.[1] ?? 'unknown';
 }
 
 function readSafely(path: string): string | null {

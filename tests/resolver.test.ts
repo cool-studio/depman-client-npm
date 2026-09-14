@@ -664,74 +664,205 @@ describe('pnpm resolution', () => {
         assert.match(sink.text(), /refusing to guess/);
     });
 
-    test('pnpm without its virtual store is refused loudly by name', () => {
+    test('pnpm’s hoisted linker resolves through the manifest walk, still named pnpm', () => {
         const root = workspace();
         roots.push(root);
-        writeJson(root, 'package.json', { name: 'consumer' });
+        writeJson(root, 'package.json', { name: 'consumer', dependencies: { a: '^1.0.0' } });
         write(root, 'node_modules/.modules.yaml', 'nodeLinker: hoisted\npackageManager: pnpm@9.12.0\n');
+        writeJson(root, 'node_modules/a/package.json', { name: 'a', version: '1.0.0' });
 
-        const { resolution, sink } = resolveWith(root);
+        const { resolution } = resolveWith(root);
 
-        assert.deepEqual(resolution, { outcome: 'refused', manager: 'pnpm' });
-        assert.match(sink.text(), /pnpm/);
+        assert.equal(resolution.outcome, 'resolved');
+
+        if (resolution.outcome === 'resolved') {
+            assert.deepEqual(resolution.packageManager, {
+                name: 'pnpm',
+                version: '9.12.0',
+                lockfileName: 'pnpm-lock.yaml',
+            });
+            assert.equal(resolution.packages[0]?.name, 'a');
+        }
     });
 });
 
-describe('Refused package managers', () => {
-    function refusedProject(files: Record<string, string>): {
-        resolution: ReturnType<Resolver['resolve']>;
-        sink: { text(): string };
-    } {
+describe('Flat node_modules layouts (the manifest walk)', () => {
+    /** A real flat tree: package dirs with their own installed manifests. */
+    function flatProject(manifest: unknown, files: Record<string, unknown>): string {
         const root = workspace();
         roots.push(root);
-        writeJson(root, 'package.json', { name: 'consumer' });
+        writeJson(root, 'package.json', manifest);
 
         for (const [path, contents] of Object.entries(files)) {
-            write(root, path, contents);
+            if (typeof contents === 'string') {
+                write(root, path, contents);
+            } else {
+                writeJson(root, path, contents);
+            }
         }
 
-        return resolveWith(root);
+        return root;
     }
 
     test('a PnP file that cannot be read as data is skipped loudly, never executed', () => {
-        const { resolution, sink } = refusedProject({ '.pnp.cjs': '/* generated, but no extractable state */' });
+        const root = flatProject({ name: 'consumer' }, { '.pnp.cjs': '/* generated, but no extractable state */' });
+        const { resolution, sink } = resolveWith(root);
 
         assert.deepEqual(resolution, { outcome: 'absent' });
         assert.match(sink.text(), /will not execute \.pnp\.cjs/);
     });
 
-    test('a Yarn node_modules tree is refused by name', () => {
-        const { resolution, sink } = refusedProject({
-            'yarn.lock': '# yarn lockfile v1',
-            'node_modules/a/package.json': '{"name":"a","version":"1.0.0"}',
-        });
+    test('a Yarn Classic tree resolves from the installed manifests: scopes, edges, attribution', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0' }, devDependencies: { d: '^2.0.0' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0', dependencies: { b: '^1.0.0' } },
+                'node_modules/b/package.json': { name: 'b', version: '1.5.0' },
+                'node_modules/d/package.json': { name: 'd', version: '2.0.0' },
+            },
+        );
 
-        assert.deepEqual(resolution, { outcome: 'refused', manager: 'yarn' });
-        assert.match(sink.text(), /Yarn/);
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome, 'resolved');
+
+        if (resolution.outcome !== 'resolved') {
+            return;
+        }
+
+        assert.deepEqual(resolution.packageManager, { name: 'yarn', version: 'unknown', lockfileName: 'yarn.lock' });
+        assert.deepEqual(
+            resolution.packages.map((entry) => [entry.name, entry.scope, entry.relationship, entry.depth]),
+            [
+                ['a', 'runtime', 'direct', 0],
+                ['b', 'runtime', 'transitive', 1],
+                ['d', 'dev', 'direct', 0],
+            ],
+        );
+        assert.deepEqual(resolution.packages[1]?.paths, [['pkg:npm/a@1.0.0']]);
     });
 
-    test('a Yarn Berry install-state is refused even without a lockfile beside it', () => {
-        const { resolution } = refusedProject({ '.yarn/install-state.gz': 'binary' });
+    test('a nested duplicate resolves to its own parent, deepest node_modules first', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0', shared: '^1.0.0' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0', dependencies: { shared: '^2.0.0' } },
+                'node_modules/shared/package.json': { name: 'shared', version: '1.0.0' },
+                'node_modules/a/node_modules/shared/package.json': { name: 'shared', version: '2.0.0' },
+            },
+        );
 
-        assert.deepEqual(resolution, { outcome: 'refused', manager: 'yarn' });
+        const shared = resolve(root).filter((entry) => entry.name === 'shared');
+
+        assert.deepEqual(shared.map((entry) => entry.version).sort(), ['1.0.0', '2.0.0']);
+        assert.deepEqual(shared.find((entry) => entry.version === '2.0.0')?.paths, [['pkg:npm/a@1.0.0']]);
     });
 
-    test('Bun is refused by name', () => {
-        const { resolution, sink } = refusedProject({
-            'bun.lockb': 'binary',
-            'node_modules/a/package.json': '{"name":"a","version":"1.0.0"}',
-        });
+    test('an optionalDependencies edge in an installed manifest makes the subtree optional', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0', optionalDependencies: { o: '^1.0.0' } },
+                'node_modules/o/package.json': { name: 'o', version: '1.0.0' },
+            },
+        );
 
-        assert.deepEqual(resolution, { outcome: 'refused', manager: 'bun' });
-        assert.match(sink.text(), /Bun/);
+        assert.equal(resolve(root).find((entry) => entry.name === 'o')?.scope, 'optional');
     });
 
-    test('a lockfile with nothing installed is a skip, not a refusal', () => {
-        // Nothing on disk to report is an ordinary state; the refusal is for
-        // trees that exist and cannot be read honestly.
-        const { resolution } = refusedProject({ 'bun.lock': '{}' });
+    test('a dependency\u2019s own devDependencies are never walked', () => {
+        // `ghost` is hoisted for some other reason; reaching it through a
+        // dependency's devDependencies would invent an edge that is not
+        // installed.
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0', devDependencies: { ghost: '^1.0.0' } },
+                'node_modules/ghost/package.json': { name: 'ghost', version: '1.0.0' },
+            },
+        );
 
-        assert.deepEqual(resolution, { outcome: 'absent' });
+        assert.deepEqual(
+            resolve(root).map((entry) => entry.name),
+            ['a'],
+        );
+    });
+
+    test('an installed peer dependency is a real edge', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0', p: '^3.0.0' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0', peerDependencies: { p: '^3.0.0' } },
+                'node_modules/p/package.json': { name: 'p', version: '3.0.0' },
+            },
+        );
+
+        assert.equal(resolve(root).find((entry) => entry.name === 'p')?.depth, 0);
+    });
+
+    test('a symlinked entry is the consumer\u2019s own code and is skipped', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0', web: 'link:./web' } },
+            {
+                'yarn.lock': '# yarn lockfile v1',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0' },
+                'web/package.json': { name: 'web', version: '1.0.0' },
+            },
+        );
+        link(join(root, 'web'), join(root, 'node_modules', 'web'));
+
+        assert.deepEqual(
+            resolve(root).map((entry) => entry.name),
+            ['a'],
+        );
+    });
+
+    test('a Yarn Berry node-modules tree is detected by its state markers and pinned version', () => {
+        const root = flatProject(
+            { name: 'consumer', packageManager: 'yarn@4.5.0', dependencies: { a: '^1.0.0' } },
+            {
+                'node_modules/.yarn-state.yml': 'version: 1\n',
+                '.yarn/install-state.gz': 'binary',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0' },
+            },
+        );
+
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome, 'resolved');
+        assert.equal(resolution.outcome === 'resolved' && resolution.packageManager.name, 'yarn');
+        assert.equal(resolution.outcome === 'resolved' && resolution.packageManager.version, '4.5.0');
+    });
+
+    test('a Bun tree is detected by its lockfile and resolved the same way', () => {
+        const root = flatProject(
+            { name: 'consumer', dependencies: { a: '^1.0.0' } },
+            {
+                'bun.lockb': 'binary',
+                'node_modules/a/package.json': { name: 'a', version: '1.0.0' },
+            },
+        );
+
+        const { resolution } = resolveWith(root);
+
+        assert.equal(resolution.outcome, 'resolved');
+
+        if (resolution.outcome === 'resolved') {
+            assert.deepEqual(resolution.packageManager, { name: 'bun', version: 'unknown', lockfileName: 'bun.lock' });
+            assert.equal(resolution.packages[0]?.name, 'a');
+        }
+    });
+
+    test('a lockfile with nothing installed is a skip', () => {
+        // Nothing on disk to report is an ordinary state.
+        const root = flatProject({ name: 'consumer' }, { 'bun.lock': '{}' });
+
+        assert.deepEqual(resolveWith(root).resolution, { outcome: 'absent' });
     });
 
     test('the npm hidden lockfile outranks a stray yarn.lock', () => {

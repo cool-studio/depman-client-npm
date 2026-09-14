@@ -43,8 +43,8 @@ interface Instance {
 
 export type PnpmRead =
     | { outcome: 'tree'; tree: InstalledTree; version: string }
-    /** Recognisably pnpm, deliberately not resolved. Already reported loudly. */
-    | { outcome: 'refused' }
+    /** Recognisably pnpm, but a flat layout: the manifest walk resolves it. */
+    | { outcome: 'hoisted'; version: string }
     /** A layout this reader does not understand. Already reported loudly. */
     | { outcome: 'unreadable' }
     | { outcome: 'absent' };
@@ -62,15 +62,10 @@ export function readPnpmTree(projectRoot: string, logger: Logger): PnpmRead {
     }
 
     if (!hasStore) {
-        // nodeLinker: hoisted, or a relocated virtual store. Either way the
-        // per-package record this reader needs is not where pnpm's default
-        // layout puts it, and a generic walk would fabricate the scopes.
-        logger.warn(
-            'pnpm installed this tree without its isolated layout (node_modules/.pnpm is missing), ' +
-                'so there is no per-package record to read. Use the CI step or the HTTP contract instead.',
-        );
-
-        return { outcome: 'refused' };
+        // nodeLinker: hoisted, or a relocated virtual store: a flat tree
+        // whose record is the installed manifests themselves. The dispatcher
+        // resolves it with the manifest walk (ADR-0046).
+        return { outcome: 'hoisted', version: pnpmVersion(modulesManifest) };
     }
 
     const instances = readStore(store, logger);

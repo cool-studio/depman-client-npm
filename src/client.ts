@@ -61,13 +61,6 @@ export class Client {
 
         const resolution = this.resolver.resolve(projectRoot, config.includeDev(env), config.includeOptional(env));
 
-        if (resolution.outcome === 'refused') {
-            // The resolver has already named the manager loudly. A manager
-            // this client does not resolve is an ordinary state, not a
-            // failure -- the CI step and the HTTP contract still work.
-            return Result.skipped(`unsupported package manager (${resolution.manager})`);
-        }
-
         if (resolution.outcome === 'absent') {
             return Result.skipped('no installed tree');
         }

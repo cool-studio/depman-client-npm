@@ -126,6 +126,19 @@ export function scopeOfClasses(classes: number): Scope {
     return 'optional';
 }
 
+/**
+ * The `packageManager: "<name>@X.Y.Z"` pin in the root manifest -- the
+ * committed value corepack enforces, and the closest thing a flat layout has
+ * to an installer version. Absent or another manager's pin degrades to
+ * `unknown`, never a guess.
+ */
+export function pinnedManagerVersion(projectRoot: string, manager: string): string {
+    const pin = readManifest(join(projectRoot, 'package.json'))?.packageManager;
+    const matched = typeof pin === 'string' ? new RegExp(`^${manager}@(\\S+)$`).exec(pin) : null;
+
+    return matched?.[1] ?? 'unknown';
+}
+
 export function readManifest(path: string): Record<string, unknown> | null {
     let decoded: unknown;
 

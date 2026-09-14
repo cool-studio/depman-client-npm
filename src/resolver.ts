@@ -2,7 +2,9 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Graph, type InstalledTree, type Scope } from './graph.js';
 import type { Logger } from './logger.js';
+import { readManifestWalkTree } from './resolvers/manifest-walk.js';
 import { readPnpmTree } from './resolvers/pnpm.js';
+import { pinnedManagerVersion } from './resolvers/scopes.js';
 import { readYarnPnpTree } from './resolvers/yarn-pnp.js';
 
 /**
@@ -25,9 +27,11 @@ import { readYarnPnpTree } from './resolvers/yarn-pnp.js';
  *   - **Yarn Plug'n'Play**: the PnP state, read as data -- `.pnp.data.json`,
  *     or the literal extracted from `.pnp.cjs` as text. Never evaluated. See
  *     resolvers/yarn-pnp.ts and ADR-0045.
- *   - **Yarn's other linkers**, **Bun**, and pnpm's hoisted linker: recognised
- *     and refused loudly, by name. What they leave on disk cannot be read
- *     without guessing at scopes -- ADR-0044 records each reason.
+ *   - **Every flat layout** -- Yarn Classic, Yarn Berry's node-modules
+ *     linker, Bun, pnpm's hoisted linker: the installed packages' own
+ *     manifests, resolved by node's algorithm. See
+ *     resolvers/manifest-walk.ts and ADR-0046. Detection names the manager;
+ *     the read is the same for all of them.
  *
  * Direct-versus-transitive is reconstructed from the root `package.json`'s
  * dependency sections in every case, and the attribution walk is shared.
@@ -69,12 +73,6 @@ export interface PackageManagerInfo {
 export type Resolution =
     /** A tree was read, by the manager named here. */
     | { outcome: 'resolved'; packages: PackageEntry[]; packageManager: PackageManagerInfo }
-    /**
-     * A recognised manager this client deliberately does not resolve. The
-     * resolver has already said so loudly; the caller skips -- an unsupported
-     * manager is an ordinary state, never a failure (section 0).
-     */
-    | { outcome: 'refused'; manager: string }
     /** Nothing installed, or a tree too broken to read. Reported already. */
     | { outcome: 'absent' };
 
@@ -111,8 +109,18 @@ export class Resolver {
             });
         }
 
-        if (pnpm.outcome === 'refused') {
-            return { outcome: 'refused', manager: 'pnpm' };
+        if (pnpm.outcome === 'hoisted') {
+            return this.entries(
+                readManifestWalkTree(projectRoot, this.logger),
+                projectRoot,
+                includeDev,
+                includeOptional,
+                {
+                    name: 'pnpm',
+                    version: pnpm.version,
+                    lockfileName: 'pnpm-lock.yaml',
+                },
+            );
         }
 
         if (pnpm.outcome === 'unreadable') {
@@ -133,14 +141,16 @@ export class Resolver {
             return { outcome: 'absent' };
         }
 
-        const refused = this.refusal(projectRoot);
+        const flat = this.flatTreeManager(projectRoot);
 
-        if (refused !== null) {
-            // Loud, and it names the manager: against an installed tree,
-            // "nothing to report" reads as "no vulnerabilities".
-            this.logger.warn(refused.message);
-
-            return { outcome: 'refused', manager: refused.manager };
+        if (flat !== null) {
+            return this.entries(
+                readManifestWalkTree(projectRoot, this.logger),
+                projectRoot,
+                includeDev,
+                includeOptional,
+                flat,
+            );
         }
 
         this.logger.debug('no installed tree found; nothing to report.');
@@ -149,29 +159,34 @@ export class Resolver {
     }
 
     /**
-     * Managers this client recognises and deliberately does not resolve.
-     * ADR-0044 records each reason; the detection is from what is on disk.
+     * Flat `node_modules` layouts, named by the manager that installed them
+     * -- detection from what is on disk, never from the user agent. The tree
+     * itself is read the same way for all of them: from the installed
+     * packages' own manifests (resolvers/manifest-walk.ts, ADR-0046).
+     * Plug'n'Play never reaches here; resolvers/yarn-pnp.ts owns its files.
      */
-    private refusal(projectRoot: string): { manager: string; message: string } | null {
+    private flatTreeManager(projectRoot: string): PackageManagerInfo | null {
         const has = (relative: string) => exists(join(projectRoot, relative));
 
-        // Plug'n'Play never reaches here -- resolvers/yarn-pnp.ts owns those
-        // files, resolving them or refusing loudly itself.
-        if (has('.yarn/install-state.gz') || (has('yarn.lock') && has('node_modules'))) {
+        if (!has('node_modules')) {
+            return null;
+        }
+
+        // Berry's node-modules linker leaves state markers; Classic leaves
+        // only its lockfile. Both are Yarn's flat trees.
+        if (has('node_modules/.yarn-state.yml') || has('.yarn/install-state.gz') || has('yarn.lock')) {
             return {
-                manager: 'yarn',
-                message:
-                    'Yarn installed this tree, and it leaves no per-package record this client ' +
-                    'can read without guessing at the scopes. Use the CI step or the HTTP contract instead.',
+                name: 'yarn',
+                version: pinnedManagerVersion(projectRoot, 'yarn'),
+                lockfileName: 'yarn.lock',
             };
         }
 
-        if ((has('bun.lockb') || has('bun.lock')) && has('node_modules')) {
+        if (has('bun.lockb') || has('bun.lock')) {
             return {
-                manager: 'bun',
-                message:
-                    'Bun installed this tree, and Bun records no installed state at all -- its ' +
-                    'lockfile is an intention, not what is on disk. Use the CI step or the HTTP contract instead.',
+                name: 'bun',
+                version: pinnedManagerVersion(projectRoot, 'bun'),
+                lockfileName: 'bun.lock',
             };
         }
 
