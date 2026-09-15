@@ -52,7 +52,7 @@ export const CLIENT_NAME = '@depman/client';
  * lags the tag makes every report lie about itself. See the client release
  * checklist in docs/release-checklist.md.
  */
-export const CLIENT_VERSION = '0.1.2';
+export const CLIENT_VERSION = '0.1.3';
 
 export class Reporter {
     constructor(private readonly logger: Logger) {}

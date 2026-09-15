@@ -1,6 +1,6 @@
 {
     "name": "@depman/client",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "description": "Reports installed npm dependencies to DepMan from a post-install hook.",
     "license": "MIT",
     "repository": {
