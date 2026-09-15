@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +29,46 @@ describe('package.json', () => {
         // `depman` unscoped is a real, unrelated package on the registry, and
         // npx falls back to fetching it when a name does not resolve locally.
         assert.deepEqual(manifest.bin, { depman: './dist/src/cli.js' });
+    });
+
+    test('it names an entry point, and the file is there', async () => {
+        // **A `bin` without a `main` is a package Node's resolver cannot
+        // answer for.** Resolving the bare specifier falls through to
+        // legacyMainResolve, which looks for `main`, then `index.js`, finds
+        // neither and throws ERR_MODULE_NOT_FOUND -- so any tool that
+        // enumerates a project's dependencies and resolves each one dies on
+        // ours. `@roots/bud` does exactly that to discover extension
+        // commands, and `bud build` failed outright wherever this client was
+        // installed (ADR-0048).
+        //
+        // Nobody on the documented path imports this. The bin is what runs,
+        // and this entry point exists to make the package resolvable.
+        assert.equal(manifest.main, './dist/src/index.js');
+        assert.ok(existsSync(join(ROOT, 'dist', 'src', 'index.js')), 'main points at a built file');
+    });
+
+    test('the entry point has no side effects', async () => {
+        // `main` must not point at `cli.ts`: it calls main() when it loads,
+        // so importing the package would run the CLI -- parse argv, report a
+        // tree, set an exit code -- inside whatever tool merely resolved us.
+        // Importing the real entry point here is the assertion; if it ever
+        // grows a side effect that touches the exit code, this fails.
+        const entry = (await import('../src/index.js')) as Record<string, unknown>;
+
+        assert.equal(process.exitCode, undefined);
+        assert.equal(entry.CLIENT_VERSION, CLIENT_VERSION);
+        assert.equal(typeof entry.Reporter, 'function');
+    });
+
+    test('it declares no exports map', () => {
+        // An `exports` map would fix the resolve above and break two things
+        // that work today: a subpath nobody declared (`@depman/client/
+        // dist/src/cli.js`, which is how some runners invoke a bin directly)
+        // becomes ERR_PACKAGE_PATH_NOT_EXPORTED, and so does the
+        // trailing-slash directory form that resolves fine right now.
+        // `main` alone is strictly additive -- nothing that resolves today
+        // stops resolving. ADR-0048 records the choice.
+        assert.equal(manifest.exports, undefined);
     });
 
     test('the published name is the one the specification fixes', () => {
