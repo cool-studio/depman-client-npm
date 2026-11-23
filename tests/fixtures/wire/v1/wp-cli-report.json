@@ -1,0 +1,76 @@
+{
+    "depmanWireVersion": 1,
+    "report": {
+        "manifestDigest": "sha256:7e49a3017418ff235aa5fb6b77b76b88ef062df67bff332caa1503abee76de70",
+        "generatedAt": "2026-11-23T12:00:00Z",
+        "reason": "manual"
+    },
+    "project": "example-blog",
+    "environment": {
+        "name": "production",
+        "resolvedFrom": "DEPMAN_ENV",
+        "ci": false
+    },
+    "client": {
+        "name": "depman/wp-cli-client",
+        "version": "0.1.0",
+        "packageManager": {
+            "name": "wp-cli",
+            "version": "2.12.0"
+        },
+        "runtime": {
+            "name": "php",
+            "version": "7.4.33"
+        }
+    },
+    "ecosystem": "composer",
+    "manifest": {
+        "path": "."
+    },
+    "packages": [
+        {
+            "purl": "pkg:composer/johnpbloch/wordpress-core@6.8.3",
+            "name": "johnpbloch/wordpress-core",
+            "version": "6.8.3",
+            "scope": "runtime",
+            "relationship": "direct",
+            "type": "wordpress-core"
+        },
+        {
+            "purl": "pkg:composer/wordpress-dropin--local/object-cache@unknown",
+            "name": "wordpress-dropin--local/object-cache",
+            "version": "unknown",
+            "scope": "runtime",
+            "relationship": "direct",
+            "type": "wordpress-dropin"
+        },
+        {
+            "purl": "pkg:composer/wordpress-plugin--local/acme-pro@2.1.0",
+            "name": "wordpress-plugin--local/acme-pro",
+            "version": "2.1.0",
+            "scope": "runtime",
+            "relationship": "direct",
+            "type": "wordpress-plugin"
+        },
+        {
+            "purl": "pkg:composer/wpackagist-plugin/akismet@5.3.3",
+            "name": "wpackagist-plugin/akismet",
+            "version": "5.3.3",
+            "scope": "runtime",
+            "relationship": "direct",
+            "type": "wordpress-plugin"
+        },
+        {
+            "purl": "pkg:composer/wpackagist-theme/twentytwentyfour@1.2",
+            "name": "wpackagist-theme/twentytwentyfour",
+            "version": "1.2",
+            "scope": "runtime",
+            "relationship": "direct",
+            "type": "wordpress-theme"
+        }
+    ],
+    "counts": {
+        "packages": 5
+    },
+    "warnings": []
+}
